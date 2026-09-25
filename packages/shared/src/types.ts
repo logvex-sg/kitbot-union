@@ -112,6 +112,20 @@ export interface Vec3 {
   y: number;
   z: number;
 }
+
+/** True only for a plain object with three finite numeric coordinates. */
+export function isVec3(value: unknown): value is Vec3 {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate['x'] === 'number' &&
+    Number.isFinite(candidate['x']) &&
+    typeof candidate['y'] === 'number' &&
+    Number.isFinite(candidate['y']) &&
+    typeof candidate['z'] === 'number' &&
+    Number.isFinite(candidate['z'])
+  );
+}
 export interface BotPosition extends Vec3 {
   yaw?: number;
   pitch?: number;

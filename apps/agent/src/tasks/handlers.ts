@@ -1,5 +1,5 @@
 import type { PriorityTask, TaskExecutionContext, Vec3 } from '@unionkitbot/shared';
-import { NotConnectedError, ValidationError } from '@unionkitbot/shared';
+import { NotConnectedError, ValidationError, isVec3 } from '@unionkitbot/shared';
 import type { AgentContext } from '../types.js';
 
 export type HandlerMap = Record<
@@ -71,10 +71,17 @@ export function createTaskHandlers(context: AgentContext): HandlerMap {
     },
 
     STORAGE_SCAN: async (task, _ctx) => {
-      const payload = task.payload as { origin: Vec3; radius?: number };
-      requireBot();
+      const payload = task.payload as { origin?: Vec3; radius?: number };
+      const bot = requireBot();
+      const origin = isVec3(payload.origin)
+        ? payload.origin
+        : {
+            x: bot.entity.position.x,
+            y: bot.entity.position.y,
+            z: bot.entity.position.z,
+          };
       const radius = payload.radius ?? context.settings.storage.scanRadius;
-      const scan = await context.scanner.scan(payload.origin, {
+      const scan = await context.scanner.scan(origin, {
         radius,
         inspectContents: context.settings.storage.inspectContents,
       });

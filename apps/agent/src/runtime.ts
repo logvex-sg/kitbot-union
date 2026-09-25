@@ -77,6 +77,12 @@ export class BotRuntime {
   private heartbeat: NodeJS.Timeout | null = null;
   private startedAt = Date.now();
   private runningTaskId: string | null = null;
+  /**
+   * Serialises persistence per task. onTaskUpdated fires for every transition, and the
+   * resulting upserts are concurrent, so without chaining the earlier RUNNING write can
+   * land after the terminal COMPLETED/FAILED write and strand the row as RUNNING forever.
+   */
+  private readonly persistChains = new Map<string, Promise<void>>();
   private wasStartedFlag = false;
 
   constructor(definition: BotDefinitionInput, deps: RuntimeDependencies) {
@@ -443,12 +449,21 @@ export class BotRuntime {
     return task;
   }
 
-  private async persistTask(task: PriorityTask): Promise<void> {
-    try {
-      await this.deps.repositories.tasks.upsert(task);
-    } catch (error: unknown) {
-      this.deps.logger.debug({ err: error, taskId: task.id }, 'failed to persist task');
-    }
+  private persistTask(task: PriorityTask): Promise<void> {
+    const previous = this.persistChains.get(task.id) ?? Promise.resolve();
+    const next = previous
+      .then(async () => {
+        try {
+          await this.deps.repositories.tasks.upsert(task);
+        } catch (error: unknown) {
+          this.deps.logger.debug({ err: error, taskId: task.id }, 'failed to persist task');
+        }
+      })
+      .finally(() => {
+        if (this.persistChains.get(task.id) === next) this.persistChains.delete(task.id);
+      });
+    this.persistChains.set(task.id, next);
+    return next;
   }
 
   /** Restores in-flight tasks after a process restart, preserving their resume state. */
