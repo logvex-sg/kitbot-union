@@ -18,5 +18,7 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     reporters: ['default'],
+    // Tests that exercise internal 5s timeout paths need headroom above the default.
+    testTimeout: 15_000,
   },
 });

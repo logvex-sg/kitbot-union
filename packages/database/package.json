@@ -18,11 +18,11 @@
   },
   "dependencies": {
     "@unionkitbot/shared": "workspace:*",
-    "pg": "^8.13.1",
-    "ioredis": "^5.4.2"
+    "pg": "^8.23.0",
+    "ioredis": "^6.0.0"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",
-    "typescript": "^5.7.2"
+    "typescript": "^6.0.3"
   }
 }

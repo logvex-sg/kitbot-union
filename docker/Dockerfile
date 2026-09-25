@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # UnionKitBot monorepo image. Build context is the repository root.
-FROM node:20-bookworm-slim AS base
+FROM node:24-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
 WORKDIR /app
 
 # ------------------------------------------------------------------ deps

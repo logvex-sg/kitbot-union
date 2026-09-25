@@ -21,7 +21,7 @@ export const createTaskSchema = z.object({
   botId: uuidSchema,
   type: taskTypeSchema,
   priority: taskPrioritySchema.optional(),
-  payload: z.record(z.unknown()).default({}),
+  payload: z.record(z.string(), z.unknown()).default({}),
   maxAttempts: z.number().int().min(1).max(10).optional(),
 });
 

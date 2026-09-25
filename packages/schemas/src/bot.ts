@@ -32,7 +32,7 @@ export const createBotSchema = z.object({
   authType: z.enum(['offline', 'microsoft']).default('offline'),
   enabled: z.boolean().default(true),
   autoConnect: z.boolean().default(true),
-  settings: z.record(z.unknown()).default({}),
+  settings: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const updateBotSchema = createBotSchema.partial().omit({ name: true });
@@ -47,7 +47,7 @@ export const botSettingsSchema = z.object({
       timeoutMs: z.number().int().min(1000).max(600_000),
       trustedPlayers: z.array(z.string().max(16)),
       blockedPlayers: z.array(z.string().max(16)),
-      customRules: z.record(z.boolean()),
+      customRules: z.record(z.string(), z.boolean()),
       cooldownMs: z.number().int().min(0).max(600_000),
       maxPending: z.number().int().min(1).max(1000),
     })
@@ -118,7 +118,7 @@ export const botConfigFileSchema = z.object({
         authType: z.enum(['offline', 'microsoft']).default('offline'),
         enabled: z.boolean().default(true),
         autoConnect: z.boolean().default(true),
-        settings: z.record(z.unknown()).default({}),
+        settings: z.record(z.string(), z.unknown()).default({}),
       }),
     )
     .default([]),

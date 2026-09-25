@@ -11,7 +11,7 @@ export const createWaypointSchema = z.object({
   z: z.number(),
   botId: uuidSchema.nullable().optional(),
   playerId: uuidSchema.nullable().optional(),
-  metadata: z.record(z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
 });
 
 export const updateWaypointSchema = createWaypointSchema.partial();

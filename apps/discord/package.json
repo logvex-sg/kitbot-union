@@ -13,11 +13,11 @@
   "dependencies": {
     "@unionkitbot/config": "workspace:*",
     "@unionkitbot/shared": "workspace:*",
-    "discord.js": "^14.16.3"
+    "discord.js": "^14.27.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^24.13.6",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^6.0.3"
   }
 }

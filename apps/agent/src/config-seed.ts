@@ -45,6 +45,7 @@ export async function seedBotsFromFile(
   } catch (error: unknown) {
     throw new Error(
       `bot config at ${filePath} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 

@@ -48,7 +48,7 @@ so a bot created after startup can be started without restarting the agent.
 ## Local development
 
 ```bash
-corepack enable && corepack prepare pnpm@9.15.0 --activate
+corepack enable && corepack prepare pnpm@10.34.5 --activate
 pnpm install
 pnpm build
 pnpm dev:api        # Fastify API + WebSocket
@@ -62,7 +62,7 @@ pnpm dev:discord    # discord.js controller
 ```bash
 pnpm typecheck
 pnpm lint
-pnpm test           # 121 tests
+pnpm test           # 148 tests
 pnpm build
 ```
 
@@ -71,8 +71,8 @@ Integration tests need real infrastructure and are skipped without it:
 ```bash
 docker run -d --name ukb-pg-test -e POSTGRES_PASSWORD=testpw \
   -e POSTGRES_USER=unionkitbot -e POSTGRES_DB=unionkitbot -p 55432:5432 \
-  -v "$PWD/migrations:/docker-entrypoint-initdb.d:ro" postgres:16-alpine
-docker run -d --name ukb-redis-test -p 56379:6379 redis:7-alpine
+  -v "$PWD/migrations:/docker-entrypoint-initdb.d:ro" postgres:18-alpine
+docker run -d --name ukb-redis-test -p 56379:6379 redis:8-alpine
 
 TEST_DATABASE_URL=postgres://unionkitbot:testpw@127.0.0.1:55432/unionkitbot \
 TEST_REDIS_URL=redis://127.0.0.1:56379 pnpm test

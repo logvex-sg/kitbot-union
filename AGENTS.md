@@ -51,8 +51,8 @@ would otherwise restart-loop.
 
 ```bash
 docker run -d --name ukb-pg-t -e POSTGRES_USER=unionkitbot -e POSTGRES_PASSWORD=testpw \
-  -e POSTGRES_DB=unionkitbot -p 55432:5432 postgres:16-alpine
-docker run -d --name ukb-redis-t -p 56379:6379 redis:7-alpine
+  -e POSTGRES_DB=unionkitbot -p 55432:5432 postgres:18-alpine
+docker run -d --name ukb-redis-t -p 56379:6379 redis:8-alpine
 DATABASE_URL=postgres://unionkitbot:testpw@127.0.0.1:55432/unionkitbot pnpm db:migrate
 TEST_DATABASE_URL=postgres://unionkitbot:testpw@127.0.0.1:55432/unionkitbot \
   TEST_REDIS_URL=redis://127.0.0.1:56379 pnpm test
