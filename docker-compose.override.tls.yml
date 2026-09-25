@@ -1,0 +1,13 @@
+# TLS overlay. Run with:
+#   docker compose -f docker-compose.yml -f docker-compose.override.tls.yml up -d
+# Requires ./docker/certs/fullchain.pem and ./docker/certs/privkey.pem.
+services:
+  ui:
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./apps/ui/dist:/usr/share/nginx/html:ro
+      - ./docker/nginx-tls.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/certs:/etc/nginx/certs:ro
+      - ./docker/certbot-webroot:/var/www/certbot:ro

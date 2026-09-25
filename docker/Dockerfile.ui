@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+# Build the unionkitbot.ui bundle and serve it as static files behind nginx.
+FROM node:20-bookworm-slim AS build
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/ui/package.json apps/ui/
+COPY packages/shared/package.json packages/shared/
+COPY packages/schemas/package.json packages/schemas/
+COPY packages/config/package.json packages/config/
+COPY packages/database/package.json packages/database/
+COPY apps/api/package.json apps/api/
+COPY apps/agent/package.json apps/agent/
+COPY apps/discord/package.json apps/discord/
+RUN --mount=type=cache,id=pnpm-ui,target=/pnpm/store pnpm install --frozen-lockfile --filter @unionkitbot/ui... --filter @unionkitbot/shared...
+COPY . .
+RUN pnpm --filter @unionkitbot/ui build
+
+FROM nginx:1.27-alpine AS runtime
+COPY --from=build /app/apps/ui/dist /usr/share/nginx/html
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
