@@ -4,6 +4,7 @@ export * from './retry.js';
 export * from './cancellation.js';
 export * from './events.js';
 export * from './priority-queue.js';
+export * from './write-behind.js';
 export * from './state-machine.js';
 export * from './inventory.js';
 export * from './storage.js';

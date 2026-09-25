@@ -126,6 +126,11 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'shutting down agent');
     await registry.stopAll(signal).catch(() => undefined);
+    // stopAll already drained each runtime, but close explicitly so a pending write cannot
+    // be lost to the process exit below.
+    await Promise.all(
+      registry.list().map((runtime) => runtime.closeTaskWrites().catch(() => undefined)),
+    );
     await control.close().catch(() => undefined);
     await redis.close().catch(() => undefined);
     process.exit(0);

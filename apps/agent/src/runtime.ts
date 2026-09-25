@@ -6,7 +6,7 @@ import type {
   TaskPriority,
   TaskType,
 } from '@unionkitbot/shared';
-import { PRIORITY_WEIGHT, PriorityTaskQueue, mergeAgentSettings, parseChatEnvelope, stripFormatting } from '@unionkitbot/shared';
+import { PRIORITY_WEIGHT, PriorityTaskQueue, WriteBehind, mergeAgentSettings, parseChatEnvelope, stripFormatting } from '@unionkitbot/shared';
 import type { Repositories, RedisState } from '@unionkitbot/database';
 import { taskRowToPriorityTask } from '@unionkitbot/database';
 import type { AgentEventEmitter } from './events.js';
@@ -78,11 +78,10 @@ export class BotRuntime {
   private startedAt = Date.now();
   private runningTaskId: string | null = null;
   /**
-   * Serialises persistence per task. onTaskUpdated fires for every transition, and the
-   * resulting upserts are concurrent, so without chaining the earlier RUNNING write can
-   * land after the terminal COMPLETED/FAILED write and strand the row as RUNNING forever.
+   * Write-behind persister for task state. Ordering per task is guaranteed, and terminal
+   * transitions are drained in stop() so a shutdown cannot lose them.
    */
-  private readonly persistChains = new Map<string, Promise<void>>();
+  private readonly taskWrites: WriteBehind<PriorityTask>;
   private wasStartedFlag = false;
 
   constructor(definition: BotDefinitionInput, deps: RuntimeDependencies) {
@@ -186,11 +185,19 @@ export class BotRuntime {
       say: (message) => this.chat.say(message),
     });
 
+    this.taskWrites = new WriteBehind<PriorityTask>(
+      (task) => task.id,
+      async (task) => {
+        await this.deps.repositories.tasks.upsert(task);
+      },
+      { logger: deps.logger },
+    );
+
     this.queue = new PriorityTaskQueue(1, {
       onTaskUpdated: (task) => {
         if (task.status === 'RUNNING') this.runningTaskId = task.id;
         else if (this.runningTaskId === task.id) this.runningTaskId = null;
-        void this.persistTask(task);
+        this.taskWrites.save(task);
       },
       onTaskDropped: (task, reason) => {
         deps.events.emit(
@@ -283,6 +290,11 @@ export class BotRuntime {
     this.navigator.cancel(reason);
     await this.connection.stop(reason);
     this.stopHeartbeat();
+    // Drain terminal task states before releasing the session, so a restart does not
+    // resurrect finished tasks as RUNNING.
+    await this.flushTaskWrites().catch((error: unknown) =>
+      this.deps.logger.debug({ err: error }, 'failed draining task writes'),
+    );
     await this.closeSession(reason);
     await this.deps.redis.clearBotState(this.definition.id).catch(() => undefined);
   }
@@ -449,21 +461,18 @@ export class BotRuntime {
     return task;
   }
 
-  private persistTask(task: PriorityTask): Promise<void> {
-    const previous = this.persistChains.get(task.id) ?? Promise.resolve();
-    const next = previous
-      .then(async () => {
-        try {
-          await this.deps.repositories.tasks.upsert(task);
-        } catch (error: unknown) {
-          this.deps.logger.debug({ err: error, taskId: task.id }, 'failed to persist task');
-        }
-      })
-      .finally(() => {
-        if (this.persistChains.get(task.id) === next) this.persistChains.delete(task.id);
-      });
-    this.persistChains.set(task.id, next);
-    return next;
+  /**
+   * Drains pending task-state writes without closing the writer, so stop/restart keeps
+   * persisting. Terminal transitions must reach Postgres before the session closes,
+   * otherwise a finished task is restored as RUNNING on the next boot.
+   */
+  async flushTaskWrites(): Promise<void> {
+    await this.taskWrites.flush();
+  }
+
+  /** Final drain on process shutdown. After this the writer rejects further snapshots. */
+  async closeTaskWrites(): Promise<void> {
+    await this.taskWrites.close();
   }
 
   /** Restores in-flight tasks after a process restart, preserving their resume state. */
