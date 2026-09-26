@@ -1,0 +1,32 @@
+{
+  "name": "@unionkitbot/agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --enable-source-maps --import tsx ./src/index.ts",
+    "start": "node ./dist/index.js"
+  },
+  "dependencies": {
+    "@unionkitbot/config": "workspace:*",
+    "@unionkitbot/database": "workspace:*",
+    "@unionkitbot/schemas": "workspace:*",
+    "@unionkitbot/shared": "workspace:*",
+    "mineflayer": "^4.39.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "minecraft-data": "^3.117.0",
+    "prismarine-item": "^1.18.0",
+    "vec3": "^0.2.0",
+    "ws": "^8.21.3",
+    "prismarine-entity": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.6",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3",
+    "@types/ws": "^8.18.1"
+  }
+}

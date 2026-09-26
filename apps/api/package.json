@@ -1,0 +1,33 @@
+{
+  "name": "@unionkitbot/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --enable-source-maps --import tsx ./src/index.ts",
+    "start": "node ./dist/index.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/websocket": "^11.3.1",
+    "@fastify/static": "^10.1.4",
+    "@unionkitbot/config": "workspace:*",
+    "@unionkitbot/database": "workspace:*",
+    "@unionkitbot/schemas": "workspace:*",
+    "@unionkitbot/shared": "workspace:*",
+    "fastify": "^5.12.5",
+    "ioredis": "^6.0.0",
+    "ws": "^8.21.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.6",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3"
+  }
+}

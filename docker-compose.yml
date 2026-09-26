@@ -1,0 +1,156 @@
+# UnionKitBot production stack for a Debian/Ubuntu VPS.
+#   cp .env.example .env && edit it, then: docker compose up -d --build
+#
+# Only the ui service publishes host ports. postgres, redis, api and agent stay on the
+# internal network, so the database and control socket are never reachable from outside.
+
+name: unionkitbot
+
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgres://${POSTGRES_USER:-unionkitbot}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-unionkitbot}
+  REDIS_URL: redis://redis:6379
+  API_SECRET: ${API_SECRET:?set API_SECRET}
+  API_HOST: 0.0.0.0
+  API_PORT: '8080'
+  WS_PATH: /api/ws
+  AGENT_CONTROL_URL: ws://agent:8090
+  AGENT_HEARTBEAT_MS: ${AGENT_HEARTBEAT_MS:-15000}
+  MC_DEFAULT_HOST: ${MC_DEFAULT_HOST:-localhost}
+  MC_DEFAULT_PORT: ${MC_DEFAULT_PORT:-25565}
+  MC_DEFAULT_VERSION: ${MC_DEFAULT_VERSION:-}
+  MC_DEFAULT_USERNAME: ${MC_DEFAULT_USERNAME:-unionkitbot}
+  MC_AUTH_TYPE: ${MC_AUTH_TYPE:-offline}
+  MC_AUTHME_PASSWORD: ${MC_AUTHME_PASSWORD:-}
+  MC_CONFIG_PATH: /app/config/bots.json
+  DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+  DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+  DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+  DISCORD_NOTIFY_CHANNEL_ID: ${DISCORD_NOTIFY_CHANNEL_ID:-}
+  DISCORD_ALLOWED_USERS: ${DISCORD_ALLOWED_USERS:-}
+  DISCORD_ALLOWED_ROLES: ${DISCORD_ALLOWED_ROLES:-}
+  CORS_ORIGINS: ${CORS_ORIGINS:-*}
+  LLM_CLASSIFIER_ENABLED: ${LLM_CLASSIFIER_ENABLED:-false}
+  LLM_API_BASE: ${LLM_API_BASE:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-unionkitbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-unionkitbot}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-unionkitbot} -d ${POSTGRES_DB:-unionkitbot}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *default-logging
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes', '--save', '60', '1']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging: *default-logging
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    command: ['node', 'apps/api/dist/index.js']
+    volumes:
+      - bot-config:/app/config
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    logging: *default-logging
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    command: ['node', 'apps/agent/dist/index.js']
+    volumes:
+      - bot-config:/app/config
+    logging: *default-logging
+
+  discord:
+    # Opt-in: `docker compose --profile discord up -d`. Without this the controller cannot
+    # start (it needs Discord credentials) and would restart-loop on every unconfigured VPS.
+    profiles: ['discord']
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      <<: *app-env
+    command: ['node', 'apps/discord/dist/index.js']
+    logging: *default-logging
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - '${UI_BIND:-127.0.0.1}:${UI_PORT:-8080}:80'
+    logging: *default-logging
+
+volumes:
+  postgres-data:
+  redis-data:
+  bot-config:
