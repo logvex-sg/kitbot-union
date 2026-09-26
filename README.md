@@ -38,9 +38,17 @@ curl -X POST http://<vps-ip>:8080/api/bots \
   -H "Authorization: Bearer $API_SECRET" -H 'Content-Type: application/json' \
   -d '{"name":"mc-01","username":"UnionKitBot","serverHost":"mc.example.net","serverPort":25565,"authType":"offline"}'
 
-curl -X POST http://<vps-ip>:8080/api/bots/mc-01/start \
+# The response contains the bot id. Lifecycle routes take that UUID, not the name.
+BOT_ID=$(curl -s http://<vps-ip>:8080/api/bots -H "Authorization: Bearer $API_SECRET" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['bots'][0]['id'])")
+
+curl -X POST "http://<vps-ip>:8080/api/bots/$BOT_ID/start" \
   -H "Authorization: Bearer $API_SECRET"
 ```
+
+`/api/bots/:id` and the lifecycle routes validate a UUID; use `/api/bots` to look the
+id up by name. Commands routed to the agent may name a bot instead, which is what the
+Discord controller does.
 
 The agent re-reads `bot_instances` when a command names a bot it has not loaded yet,
 so a bot created after startup can be started without restarting the agent.

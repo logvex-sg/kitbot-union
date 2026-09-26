@@ -10,3 +10,10 @@ logs/
 .pnpm-store/
 apps/ui/dist/
 .DS_Store
+
+# TLS material for the nginx overlay. Private keys must never be committed.
+docker/certs/
+docker/certbot-webroot/
+
+# Local database dumps produced by scripts/backup.sh.
+backups/
