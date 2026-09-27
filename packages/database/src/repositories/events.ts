@@ -148,12 +148,20 @@ export class EventRepository {
     cause: string | null;
     activeTaskId?: string | null;
     waypointId?: string | null;
+    /** Bot state at the moment of death, e.g. DELIVERING. */
+    botState?: string | null;
+    /** world/server label the death happened on. */
+    server?: string | null;
+    /** Order that was in flight when the bot died, if any. */
+    activeOrderId?: string | null;
     metadata?: Record<string, unknown>;
   }): Promise<string> {
     const id = randomUUID();
     await this.pool.query(
-      `INSERT INTO death_events (id, bot_id, dimension, x, y, z, cause, active_task_id, waypoint_id, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO death_events
+         (id, bot_id, dimension, x, y, z, cause, active_task_id, waypoint_id, bot_state,
+          server, active_order_id, metadata)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         id,
         input.botId,
@@ -164,6 +172,9 @@ export class EventRepository {
         input.cause,
         input.activeTaskId ?? null,
         input.waypointId ?? null,
+        input.botState ?? null,
+        input.server ?? null,
+        input.activeOrderId ?? null,
         jsonb(input.metadata),
       ],
     );
@@ -178,7 +189,7 @@ export class EventRepository {
   }
 
   async listDeaths(
-    filter: { botId?: string; limit?: number; offset?: number } = {},
+    filter: { botId?: string; recovered?: boolean; limit?: number; offset?: number } = {},
   ): Promise<Array<Record<string, unknown>>> {
     const clauses: string[] = [];
     const values: unknown[] = [];
@@ -186,8 +197,24 @@ export class EventRepository {
       values.push(filter.botId);
       clauses.push(`bot_id = $${values.length}`);
     }
-    const sql = listQuery('death_events', clauses, values, filter.limit ?? 100, filter.offset ?? 0);
-    const { rows } = await this.pool.query(sql, values);
+    if (filter.recovered !== undefined) {
+      values.push(filter.recovered);
+      clauses.push(`recovered = $${values.length}`);
+    }
+    values.push(filter.limit ?? 100, filter.offset ?? 0);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const { rows } = await this.pool.query(
+      `SELECT d.id, d.bot_id AS "botId", d.dimension, d.x, d.y, d.z, d.cause,
+              d.active_task_id AS "activeTaskId", d.waypoint_id AS "waypointId",
+              d.bot_state AS "state", d.server, d.active_order_id AS "activeOrderId",
+              d.recovered, d.recovered_at AS "recoveredAt", d.metadata,
+              d.created_at AS "timestamp",
+              o.code AS "orderCode", o.kit_ids AS "orderKitIds"
+       FROM death_events d
+       LEFT JOIN orders o ON o.id = d.active_order_id
+       ${where} ORDER BY d.created_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
+      values,
+    );
     return rows as Array<Record<string, unknown>>;
   }
 

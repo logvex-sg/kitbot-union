@@ -70,8 +70,12 @@ export function createTaskHandlers(context: AgentContext): HandlerMap {
       });
     },
 
-    STORAGE_SCAN: async (task, _ctx) => {
-      const payload = task.payload as { origin?: Vec3; radius?: number };
+    STORAGE_SCAN: async (task, ctx) => {
+      const payload = task.payload as {
+        origin?: Vec3;
+        radius?: number;
+        detectSigns?: boolean;
+      };
       const bot = requireBot();
       const origin = isVec3(payload.origin)
         ? payload.origin
@@ -81,12 +85,30 @@ export function createTaskHandlers(context: AgentContext): HandlerMap {
             z: bot.entity.position.z,
           };
       const radius = payload.radius ?? context.settings.storage.scanRadius;
+      const kits = await context.storageMappings.kits();
+      ctx.setResumeState({ phase: 'scanning', origin, radius });
       const scan = await context.scanner.scan(origin, {
         radius,
         inspectContents: context.settings.storage.inspectContents,
+        detectSigns: payload.detectSigns ?? context.settings.storage.signAutoDetect,
+        signMaxDistance: context.settings.storage.signMaxDistance,
+        kits,
+        onRecognised: async (recognition) => {
+          await context.storageMappings.record(recognition.recognised, scan.result.scanId);
+        },
       });
       await context.storage.saveScan(scan.result, null, scan.contents);
-      return scan.result;
+      return {
+        ...scan.result,
+        recognised: scan.recognition
+          ? {
+              signsFound: scan.recognition.signsFound,
+              kitsRecognised: scan.recognition.kitsRecognised,
+              ambiguous: scan.recognition.ambiguous,
+              unreadable: scan.recognition.unreadable,
+            }
+          : null,
+      };
     },
 
     DEATH_RECOVERY: async (task, ctx) => {
@@ -131,6 +153,27 @@ export function createTaskHandlers(context: AgentContext): HandlerMap {
     TELEMETRY: async () => {
       await context.registry.publishSnapshot(context.botId);
       return { published: true };
+    },
+
+    /**
+     * Executes a stored order.
+     *
+     * The payload carries the order id, which is the durable source of truth: the task is
+     * only the trigger. If the task is retried after a restart the order resumes from the
+     * state recorded in Postgres instead of starting over.
+     */
+    ORDER: async (task, ctx) => {
+      const payload = task.payload as { orderId?: string };
+      if (!payload.orderId) throw new ValidationError('ORDER requires payload.orderId');
+      ctx.setResumeState({ orderId: payload.orderId, step: 'starting' });
+      const outcome = await context.orders.run(payload.orderId, {
+        token: ctx.token,
+        setResumeState: ctx.setResumeState,
+        taskId: task.id,
+      });
+      // A failed order has already been persisted and reported; surfacing it as a task error
+      // would trigger a retry that cannot succeed until an operator intervenes.
+      return outcome;
     },
   };
 }
