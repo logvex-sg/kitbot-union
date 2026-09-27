@@ -12,6 +12,15 @@ export interface DeathServiceOptions {
   waypoints: WaypointService;
   getDimension: () => string;
   getActiveTaskId: () => string | null;
+  /**
+   * Bot state at the time of death, e.g. DELIVERING. Optional: death logging must still
+   * succeed when the runtime is already tearing down and cannot report its state.
+   */
+  getState?: () => string;
+  /** world/server label, recorded so a death can be attributed to a world. */
+  server?: string;
+  /** Order in flight when the bot died, used by recovery to release its reservation. */
+  getActiveOrderId?: () => string | null;
 }
 
 export interface DeathRecord {
@@ -20,6 +29,9 @@ export interface DeathRecord {
   position: Vec3 | null;
   dimension: string;
   activeTaskId: string | null;
+  activeOrderId: string | null;
+  botState: string;
+  server: string;
   taskToRestore: string | null;
   at: string;
 }
@@ -27,10 +39,14 @@ export interface DeathRecord {
 /**
  * Handles legitimate deaths only - the bot never kills itself. Records the event,
  * the coordinates, the active task and creates a DEATH waypoint for recovery.
+ *
+ * Every recorded death is emitted as `bot:death`, which the webhook dispatcher uses for
+ * the `bot_death` notification, so death reporting and death logging share one path.
  */
 export class DeathService {
   private readonly options: DeathServiceOptions;
   private lastRecord: DeathRecord | null = null;
+  private readonly history: DeathRecord[] = [];
 
   constructor(options: DeathServiceOptions) {
     this.options = options;
@@ -40,9 +56,17 @@ export class DeathService {
     return this.lastRecord;
   }
 
+  /** Most recent deaths, newest last. In-memory mirror of the persisted history. */
+  recent(limit = 20): DeathRecord[] {
+    return this.history.slice(-limit);
+  }
+
   async recordDeath(position: Vec3 | null, cause: string | null): Promise<DeathRecord> {
     const dimension = this.options.getDimension();
     const activeTaskId = this.options.getActiveTaskId();
+    const activeOrderId = this.options.getActiveOrderId?.() ?? null;
+    const botState = this.options.getState?.() ?? 'UNKNOWN';
+    const server = this.options.server ?? 'unknown';
 
     let waypointId: string | null = null;
     if (position) {
@@ -54,7 +78,7 @@ export class DeathService {
           x: position.x,
           y: position.y,
           z: position.z,
-          metadata: { cause, activeTaskId },
+          metadata: { cause, activeTaskId, activeOrderId, botState, server },
         });
         waypointId = waypoint.id;
       } catch (error) {
@@ -71,6 +95,9 @@ export class DeathService {
       cause,
       activeTaskId,
       waypointId,
+      botState,
+      server,
+      activeOrderId,
       metadata: { username: this.options.username },
     });
 
@@ -80,10 +107,15 @@ export class DeathService {
       position,
       dimension,
       activeTaskId,
+      activeOrderId,
+      botState,
+      server,
       taskToRestore: activeTaskId,
       at: new Date().toISOString(),
     };
     this.lastRecord = record;
+    this.history.push(record);
+    if (this.history.length > 100) this.history.shift();
 
     this.options.events.emit(
       'bot:death',

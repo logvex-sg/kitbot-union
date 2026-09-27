@@ -5,6 +5,7 @@ import {
   kitRequirements,
   normalizeItemName,
   sleep,
+  type AgentSettings,
   type DeliveryStep,
   type InventorySummary,
   type ItemRequirement,
@@ -55,6 +56,10 @@ export interface DeliveryServiceOptions {
   /** Distance the bot stops at before transferring items. */
   approachDistance: number;
   verifyTimeoutMs: number;
+  /** Distance within which items may be dropped to the recipient. */
+  dropRange: number;
+  /** Reads the current delivery settings at call time so edits apply without a restart. */
+  getSettings?: () => AgentSettings;
 }
 
 /**
@@ -158,8 +163,9 @@ export class DeliveryService {
 
       mark('ARRIVE', { position: nav.finalPosition });
 
-      // VERIFY_RECIPIENT - the recipient must still be nearby before we hand anything over.
-      const verified = await this.waitForRecipient(destination, ctx);
+      // VERIFY_RECIPIENT - the recipient must be the intended account and be close enough
+      // that the drop is actually reachable. The bot never drops items before this passes.
+      const verified = await this.waitForRecipient(request.recipient, ctx);
       mark('VERIFY_RECIPIENT', { ok: verified.ok, reason: verified.reason });
       if (!verified.ok)
         throw new DeliveryError(`recipient verification failed: ${verified.reason}`);
@@ -302,27 +308,67 @@ export class DeliveryService {
     }
   }
 
-  /** Polls for the recipient until they are within `approachDistance`. */
+  /**
+   * Polls until the intended recipient is online, resolvable and within the configured
+   * delivery range.
+   *
+   * The recipient is matched by name, not by whatever entity happens to be nearest: handing
+   * an order to a bystander would be a worse failure than not delivering at all. When the
+   * player cannot be seen the reason distinguishes "offline" from "too far".
+   */
   private async waitForRecipient(
-    destination: Vec3,
+    recipient: string,
     ctx: Pick<TaskExecutionContext, 'token'>,
-  ): Promise<{ ok: boolean; reason: string }> {
+  ): Promise<{ ok: boolean; reason: string; distance: number | null }> {
+    const range = this.options.dropRange;
     const deadline = Date.now() + this.options.verifyTimeoutMs;
+    let lastDistance: number | null = null;
+
     for (;;) {
       ctx.token.throwIfCancelled();
-      const bot = this.options.getBot();
-      if (!bot) return { ok: false, reason: 'disconnected' };
-      const position = bot.entity.position;
-      const dx = position.x - destination.x;
-      const dz = position.z - destination.z;
-      const distance = Math.sqrt(dx * dx + dz * dz);
-      if (distance <= this.options.approachDistance + 2) {
-        return { ok: true, reason: `within ${distance.toFixed(1)} blocks` };
+      if (!this.options.getBot()) {
+        return { ok: false, reason: 'disconnected', distance: null };
       }
-      if (Date.now() > deadline)
-        return { ok: false, reason: `still ${distance.toFixed(1)} blocks away` };
+      const entity = this.options.navigator.findPlayer(recipient);
+      if (entity) {
+        const distance = this.options.navigator.playerDistance(recipient);
+        lastDistance = distance;
+        if (distance !== null && distance <= range) {
+          return {
+            ok: true,
+            reason: `${recipient} is within ${distance.toFixed(1)} blocks`,
+            distance,
+          };
+        }
+      }
+      if (Date.now() > deadline) {
+        return {
+          ok: false,
+          reason: entity
+            ? `${recipient} is ${lastDistance?.toFixed(1) ?? '?'} blocks away, outside the ${range} block delivery range`
+            : `${recipient} is not online or not visible`,
+          distance: lastDistance,
+        };
+      }
       await sleep(500);
     }
+  }
+
+  /**
+   * Sends a command that came from this bot's own configuration.
+   *
+   * Callers must pass a configured command, never text received from Discord, chat or the
+   * API. Nothing here interprets or forwards arbitrary user input.
+   */
+  async runConfiguredCommand(command: string): Promise<void> {
+    const bot = this.options.getBot();
+    if (!bot) throw new DeliveryError('bot disconnected before running configured command');
+    const trimmed = command.trim();
+    if (!trimmed.startsWith('/')) {
+      throw new DeliveryError('configured command must start with /');
+    }
+    bot.chat(trimmed);
+    await sleep(500);
   }
 
   /** Tosses the required items near the recipient. Returns per-item delivered counts. */

@@ -1,15 +1,27 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
+  accountLinkQuerySchema,
   botSettingsSchema,
+  createAccountLinkSchema,
   createBotSchema,
+  createOrderSchema,
+  createStorageScanSchema,
   createTaskSchema,
   createWaypointSchema,
+  deathHistoryQuerySchema,
   kitSchema,
+  navigationFailureQuerySchema,
+  orderCodeParamsSchema,
+  orderListQuerySchema,
   paginationSchema,
+  storageMappingQuerySchema,
   updateBotSchema,
   updateKitSchema,
+  updateStorageMappingSchema,
   updateWaypointSchema,
+  webhookConfigSchema,
+  webhookConfigUpdateSchema,
 } from '@unionkitbot/schemas';
 import { ValidationError } from '@unionkitbot/shared';
 import type { Repositories, RedisState } from '@unionkitbot/database';
@@ -38,6 +50,45 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
 
 const idParams = z.object({ id: z.string().uuid() });
 const kitIdParams = z.object({ id: z.string().min(1).max(64) });
+
+/** Bot by explicit id, else the first configured bot. */
+async function resolveBot(
+  deps: RouteDeps,
+  botId?: string,
+): Promise<{ id: string; name: string } | null> {
+  if (botId) {
+    const bot = await deps.repositories.bots.get(botId);
+    return bot ? { id: bot.id, name: bot.name } : null;
+  }
+  const bots = await deps.repositories.bots.list();
+  const first = bots[0];
+  return first ? { id: first.id, name: first.name } : null;
+}
+
+/**
+ * Resolves the Minecraft recipient for an order.
+ *
+ * An explicit username wins; otherwise the Discord link is consulted so a caller only needs
+ * the Discord user id. Resolution failure is returned as null so the caller can answer 400
+ * instead of queueing an order that could never be delivered.
+ */
+async function resolveOrderRecipient(
+  deps: RouteDeps,
+  input: { recipient?: string; discordUserId?: string },
+): Promise<string | null> {
+  if (input.recipient) return input.recipient;
+  if (!input.discordUserId) return null;
+  const link = await deps.repositories.accountLinks.forDiscordUser(input.discordUserId);
+  return link[0]?.minecraftUsername ?? null;
+}
+
+/**
+ * Webhook URLs embed a secret token in the path, so the raw value is replaced by the
+ * repository's redacted form before leaving the API.
+ */
+function redactWebhookConfig<T extends { url: string | null; redactedUrl: string | null }>(config: T) {
+  return { ...config, url: config.redactedUrl };
+}
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
   const auth = deps.auth.requireAuth;
@@ -396,6 +447,289 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     return { scans };
   });
 
+  app.post(
+    '/api/storage/scans',
+    { preHandler: auth },
+    async (request, reply) => {
+      const input = parse(createStorageScanSchema, request.body);
+      const bot = await resolveBot(deps, input.botId);
+      if (!bot) return reply.code(404).send({ error: 'not_found', message: 'bot not found' });
+      const result = await deps.agent.send(
+        'enqueue',
+        [
+          'STORAGE_SCAN',
+          'LOW',
+          JSON.stringify({
+            ...(input.origin ? { origin: input.origin } : {}),
+            ...(input.radius !== undefined ? { radius: input.radius } : {}),
+            updateMappings: input.updateMappings,
+            triggeredBy: input.triggeredBy,
+          }),
+        ],
+        bot.name,
+      );
+      return reply.code(result.ok ? 201 : 502).send(result);
+    },
+  );
+
+  // ------------------------------------------------------------------ storage mappings
+
+  app.get('/api/storage/mappings', { preHandler: auth }, async (request) => {
+    const query = parse(storageMappingQuerySchema, request.query);
+    const mappings = await deps.repositories.storageMappings.list({
+      ...(query.botId ? { botId: query.botId } : {}),
+      ...(query.kitId ? { kitId: query.kitId } : {}),
+      ...(query.dimension ? { dimension: query.dimension } : {}),
+      unresolvedOnly: query.unresolvedOnly,
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return { mappings };
+  });
+
+  app.patch('/api/storage/mappings/:id', { preHandler: auth }, async (request, reply) => {
+    const { id } = parse(idParams, request.params);
+    const input = parse(updateStorageMappingSchema, request.body);
+    const existing = await deps.repositories.storageMappings.get(id);
+    if (!existing) return reply.code(404).send({ error: 'not_found', message: 'mapping not found' });
+    const updated = await deps.repositories.storageMappings.setOverride(
+      id,
+      input.kitId ?? null,
+      'api',
+      input.overrideEnabled ?? input.kitId !== undefined,
+    );
+    await deps.repositories.events.audit({
+      actor: 'api',
+      action: 'storage.mapping.override',
+      targetType: 'storage_mapping',
+      targetId: id,
+      detail: { kitId: input.kitId ?? null, enabled: input.overrideEnabled ?? null },
+    });
+    return { mapping: updated };
+  });
+
+  // ------------------------------------------------------------------ orders
+
+  app.get('/api/orders', { preHandler: auth }, async (request) => {
+    const query = parse(orderListQuerySchema, request.query);
+    const orders = await deps.repositories.orders.list({
+      ...(query.botId ? { botId: query.botId } : {}),
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.state ? { state: query.state } : {}),
+      ...(query.recipient ? { recipient: query.recipient } : {}),
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return { orders };
+  });
+
+  app.post('/api/orders', { preHandler: auth }, async (request, reply) => {
+    const input = parse(createOrderSchema, request.body);
+    const bot = await resolveBot(deps, input.botId);
+    if (!bot) return reply.code(404).send({ error: 'not_found', message: 'bot not found' });
+    const recipient = await resolveOrderRecipient(deps, input);
+    if (!recipient) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid_recipient', message: 'recipient could not be resolved' });
+    }
+    const result = await deps.agent.send(
+      'order',
+      [recipient, ...input.kitIds],
+      bot.name,
+    );
+    await deps.repositories.events.audit({
+      actor: input.requestedBy,
+      action: 'order.create',
+      targetType: 'bot',
+      targetId: bot.id,
+      detail: { kitIds: input.kitIds, recipient, source: input.source },
+    });
+    return reply.code(result.ok ? 201 : 502).send(result);
+  });
+
+  app.get('/api/orders/:id', { preHandler: auth }, async (request, reply) => {
+    const { id } = parse(idParams, request.params);
+    const order = await deps.repositories.orders.get(id);
+    if (!order) return reply.code(404).send({ error: 'not_found', message: 'order not found' });
+    const [items, reservations] = await Promise.all([
+      deps.repositories.orders.items(id),
+      deps.repositories.orders.reservations(id),
+    ]);
+    return { order, items, reservations };
+  });
+
+  app.post('/api/orders/code/:code/cancel', { preHandler: auth }, async (request, reply) => {
+    const { code } = parse(orderCodeParamsSchema, request.params);
+    const queried = parse(
+      z.object({ botId: z.string().uuid().optional() }),
+      request.query,
+    );
+    const bot = await resolveBot(deps, queried.botId);
+    if (!bot) return reply.code(404).send({ error: 'not_found', message: 'bot not found' });
+    const order = await deps.repositories.orders.getByCode(bot.id, code);
+    if (!order) return reply.code(404).send({ error: 'not_found', message: 'order not found' });
+    const result = await deps.agent.send('cancelorder', [String(code)], bot.name);
+    await deps.repositories.events.audit({
+      actor: 'api',
+      action: 'order.cancel',
+      targetType: 'order',
+      targetId: order.id,
+      detail: { code },
+    });
+    return result;
+  });
+
+  app.get('/api/orders/:id/attempts', { preHandler: auth }, async (request) => {
+    const { id } = parse(idParams, request.params);
+    const attempts = await deps.repositories.orders.listAttempts({ orderId: id });
+    return { attempts };
+  });
+
+  // ------------------------------------------------------------------ account links
+
+  app.get('/api/account-links', { preHandler: auth }, async (request) => {
+    const query = parse(accountLinkQuerySchema, request.query);
+    const links = await deps.repositories.accountLinks.list({
+      ...(query.discordUserId ? { discordUserId: query.discordUserId } : {}),
+      ...(query.minecraftUsername ? { minecraftUsername: query.minecraftUsername } : {}),
+      ...(query.verified !== undefined ? { verified: query.verified } : {}),
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return { links };
+  });
+
+  app.post('/api/account-links', { preHandler: auth }, async (request, reply) => {
+    const input = parse(createAccountLinkSchema, request.body);
+    const result = await deps.repositories.accountLinks.link({
+      discordUserId: input.discordUserId,
+      minecraftUsername: input.minecraftUsername,
+      method: input.method,
+      ...(input.linkedBy ? { linkedBy: input.linkedBy } : {}),
+      ...(input.verified !== undefined ? { forceVerified: input.verified } : {}),
+    });
+    if (!result.ok) {
+      return reply
+        .code(result.code === 'conflict' ? 409 : 400)
+        .send({ error: result.code, message: result.reason });
+    }
+    await deps.repositories.events.audit({
+      actor: input.linkedBy ?? 'api',
+      action: 'account.link',
+      targetType: 'account_link',
+      targetId: input.discordUserId,
+      detail: { minecraftUsername: input.minecraftUsername, method: input.method },
+    });
+    return reply.code(201).send({ link: result.link, action: result.action });
+  });
+
+  app.delete('/api/account-links/:id', { preHandler: auth }, async (request, reply) => {
+    const { id } = parse(idParams, request.params);
+    const removed = await deps.repositories.accountLinks.unlink(id);
+    if (!removed) return reply.code(404).send({ error: 'not_found', message: 'link not found' });
+    return { ok: true };
+  });
+
+  // ------------------------------------------------------------------ webhooks
+
+  app.get('/api/webhooks', { preHandler: auth }, async () => {
+    const configs = await deps.repositories.webhooks.list();
+    return { webhooks: configs.map(redactWebhookConfig) };
+  });
+
+  app.get('/api/webhooks/:name', { preHandler: auth }, async (request, reply) => {
+    const { name } = parse(z.object({ name: z.string().min(1).max(64) }), request.params);
+    const config = await deps.repositories.webhooks.getByName(name);
+    if (!config) return reply.code(404).send({ error: 'not_found', message: 'webhook not found' });
+    const deliveries = await deps.repositories.webhooks.listDeliveries({
+      webhookId: config.id,
+      limit: 20,
+    });
+    return { webhook: redactWebhookConfig(config), deliveries };
+  });
+
+  app.put('/api/webhooks', { preHandler: auth }, async (request, reply) => {
+    const input = parse(webhookConfigSchema, request.body);
+    const config = await deps.repositories.webhooks.upsert({
+      name: input.name,
+      enabled: input.enabled,
+      url: input.url ?? null,
+      events: input.events,
+      retryCount: input.retryCount,
+      timeoutMs: input.timeoutMs,
+      rateLimitPerMinute: input.rateLimitPerMinute,
+      includePayload: input.includePayload,
+    });
+    await deps.repositories.events.audit({
+      actor: 'api',
+      action: 'webhook.upsert',
+      targetType: 'webhook',
+      targetId: input.name,
+      detail: { enabled: input.enabled, events: input.events },
+    });
+    return reply.code(201).send({ webhook: redactWebhookConfig(config) });
+  });
+
+  app.patch('/api/webhooks/:name', { preHandler: auth }, async (request, reply) => {
+    const { name } = parse(z.object({ name: z.string().min(1).max(64) }), request.params);
+    const input = parse(webhookConfigUpdateSchema, request.body);
+    const existing = await deps.repositories.webhooks.getByName(name);
+    if (!existing) return reply.code(404).send({ error: 'not_found', message: 'webhook not found' });
+    const updated = await deps.repositories.webhooks.update(name, {
+      ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      ...(input.url !== undefined ? { url: input.url } : {}),
+      ...(input.events !== undefined ? { events: input.events } : {}),
+      ...(input.retryCount !== undefined ? { retryCount: input.retryCount } : {}),
+      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.rateLimitPerMinute !== undefined
+        ? { rateLimitPerMinute: input.rateLimitPerMinute }
+        : {}),
+      ...(input.includePayload !== undefined ? { includePayload: input.includePayload } : {}),
+    });
+    return { webhook: updated ? redactWebhookConfig(updated) : null };
+  });
+
+  app.get('/api/webhooks/:name/deliveries', { preHandler: auth }, async (request, reply) => {
+    const { name } = parse(z.object({ name: z.string().min(1).max(64) }), request.params);
+    const query = parse(paginationSchema, request.query);
+    const config = await deps.repositories.webhooks.getByName(name);
+    if (!config) return reply.code(404).send({ error: 'not_found', message: 'webhook not found' });
+    const deliveries = await deps.repositories.webhooks.listDeliveries({
+      webhookId: config.id,
+      limit: query.limit,
+      offset: query.offset,
+    });
+    const summary = await deps.repositories.webhooks.deliverySummary();
+    return { deliveries, summary };
+  });
+
+  // ------------------------------------------------------------------ deaths
+
+  app.get('/api/deaths', { preHandler: auth }, async (request) => {
+    const query = parse(deathHistoryQuerySchema, request.query);
+    const deaths = await deps.repositories.events.listDeaths({
+      ...(query.botId ? { botId: query.botId } : {}),
+      ...(query.recovered !== undefined ? { recovered: query.recovered } : {}),
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return { deaths };
+  });
+
+  // ------------------------------------------------------------------ deliveries
+
+  app.get('/api/navigation/failures', { preHandler: auth }, async (request) => {
+    const query = parse(navigationFailureQuerySchema, request.query);
+    const failures = await deps.repositories.orders.listNavigationFailures({
+      ...(query.botId ? { botId: query.botId } : {}),
+      stuckOnly: query.stuckOnly,
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return { failures };
+  });
+
   // ------------------------------------------------------------------ events/logs
 
   app.get('/api/events', { preHandler: auth }, async (request) => {
@@ -472,6 +806,12 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         'logs',
         'chat',
         'deliver',
+        'order',
+        'orders',
+        'cancelorder',
+        'mappings',
+        'setmapping',
+        'webhook',
       ],
     };
   });

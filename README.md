@@ -112,6 +112,30 @@ across restarts.
 Discord commands never write to Minecraft directly; they are handed to the agent
 `CommandRouter` so the agent remains the single write path.
 
+### Orders, storage mappings and webhooks
+
+Three subsystems extend the delivery flow:
+
+- **Orders** (`packages/shared/src/orders.ts`, `apps/agent/src/orders/`) run a second,
+  finer-grained state machine on top of the bot states: `ORDER_RECEIVED`, `VALIDATING`,
+  `RESERVING_ITEMS`, `NAVIGATING_TO_TPA_POINT`, `REQUESTING_TPA`, `WAITING_FOR_TPA`,
+  `TELEPORT_WAIT`, `LOCATING_PLAYER`, `DELIVERING`, `VERIFYING_DELIVERY`,
+  `RETURNING_TO_PACK_AREA`, then `COMPLETED`, `FAILED` or `CANCELLED`. Creating an order
+  also enqueues a `NORMAL`-priority `ORDER` task, so the existing queue stays the only
+  scheduler. A `ReservationLedger` keeps a queued order from promising items that another
+  order already holds; terminal states release their reservation.
+- **Storage sign mappings** (`packages/shared/src/signs.ts`,
+  `packages/database/src/repositories/storage-mappings.ts`) derive a chest's kit from the
+  sign next to it. Sign text is player-authored, so matching is deliberately conservative:
+  unknown text yields no match and a sign matching two kits is reported as ambiguous
+  rather than guessed. Each mapping keeps the detected kit and an optional operator
+  override; `effectiveKitId()` is what the delivery path reads.
+- **Webhooks** (`packages/shared/src/webhooks.ts`, `apps/agent/src/webhooks/dispatcher.ts`)
+  push notable events to an external URL. `WEBHOOK_ENABLED` plus `WEBHOOK_URL` are
+  required, `WEBHOOK_EVENTS` narrows the set of kinds, and delivery is retried with
+  backoff under a per-minute rate limit. A webhook failure is logged and never blocks the
+  bot: `start()` returns an unsubscribe function and config load failures are isolated.
+
 ## API
 
 ```
@@ -124,10 +148,25 @@ POST /api/tasks/:id/cancel
 GET  /api/deliveries
 GET  /api/waypoints               POST /api/waypoints
 DELETE /api/waypoints/:id
-GET  /api/storage/scans
+GET  /api/storage/scans           POST /api/storage/scans
+GET  /api/storage/mappings        PATCH /api/storage/mappings/:id
+GET  /api/orders                  POST /api/orders
+GET  /api/orders/:id              GET  /api/orders/:id/attempts
+POST /api/orders/code/:code/cancel
+GET  /api/account-links           POST /api/account-links
+DELETE /api/account-links/:id
+GET  /api/webhooks                PUT  /api/webhooks
+GET  /api/webhooks/:name          PATCH /api/webhooks/:name
+GET  /api/webhooks/:name/deliveries
+GET  /api/deaths                  GET  /api/navigation/failures
 GET  /api/events                  GET  /api/logs
 WS   /api/ws?token=<API_SECRET>
 ```
+
+`POST /api/orders` accepts either an explicit `recipient` or a `discordUserId`, which is
+resolved through the account links; an unresolvable recipient is a `400` rather than a
+queued order that could never be delivered. Webhook responses replace the stored URL with
+its redacted form, because the URL embeds a token.
 
 Kits use `GET /api/kits`, `PUT /api/kits/:id` (create or replace),
 `PATCH /api/kits/:id`, `DELETE /api/kits/:id`.
@@ -187,8 +226,42 @@ services. Set `LOG_LEVEL` (default `info`) to control verbosity.
 All configuration is environment based; see `.env.example`. Never commit `.env`.
 Relevant groups: PostgreSQL and Redis URLs, `API_SECRET`, Minecraft connection and
 auth (`MC_AUTH_TYPE`, offline by default; use a legitimate Microsoft account for
-online-mode servers), Discord token and allow-lists, the optional LLM classifier
-(`LLM_CLASSIFIER_ENABLED`, off by default), and the UI bind/port/accent.
+online-mode servers), Discord token and allow-lists, webhooks (`WEBHOOK_ENABLED`,
+`WEBHOOK_URL`, `WEBHOOK_EVENTS`), link policy (`LINK_REQUIRE_CONFIRMATION`,
+`LINK_ALLOW_MULTIPLE`), the optional LLM classifier (`LLM_CLASSIFIER_ENABLED`, off by
+default), and the UI bind/port/accent.
+
+## Discord commands
+
+Slash commands are registered as guild commands under `/bot` and routed to the agent, so
+permissions and validation live in one place. Read-only commands (`status`, `tasks`,
+`orders`, `mappings`, `webhook`, `inventory`, `players`, `logs`, …) are recognised as such
+but still require an allow-listed user (`DISCORD_ALLOWED_USERS`) or role
+(`DISCORD_ALLOWED_ROLES`); the controller is constructed with read-only access closed to
+the rest of the guild.
+
+```
+/bot status     [bot]                  current state and connection
+/bot start      [bot]                  start automation
+/bot stop       [bot]                  stop automation
+/bot restart    [bot]                  restart the connection
+/bot goto       x y z [bot]            navigate to coordinates
+/bot follow     player [bot]           follow a player
+/bot inventory  [bot]                  inventory summary
+/bot players    [bot]                  nearby players
+/bot tasks      [bot]                  task queue
+/bot deliver    player [kits] [bot]    one-shot delivery
+/bot order      player [kits] [bot]    queue an order (multi-phase, reserved)
+/bot orders     [bot]                  recent orders
+/bot cancelorder code [bot]            cancel an order by code
+/bot mappings   [bot]                  sign-based kit mappings
+/bot setmapping group kit [bot]        override a mapping ("-" clears it)
+/bot webhook    [bot]                  webhook status (URL redacted)
+/bot say        message [bot]          send a chat line
+```
+
+Replies are always ephemeral-safe and outbound content never includes tokens, passwords
+or API keys.
 
 The optional LLM classifier only ever labels ambiguous chat. Its output passes
 through deterministic validation before it can cause any Minecraft action.

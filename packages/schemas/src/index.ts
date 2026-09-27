@@ -5,3 +5,4 @@ export * from './kit.js';
 export * from './waypoint.js';
 export * from './auth.js';
 export * from './config.js';
+export * from './order.js';

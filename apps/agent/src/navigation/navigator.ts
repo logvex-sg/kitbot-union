@@ -6,6 +6,7 @@ import mineflayerPathfinder from 'mineflayer-pathfinder';
 import {
   CancelToken,
   CancellationError,
+  MIN_MOVEMENT_EPSILON,
   NavigationError,
   TimeoutError,
   createStuckTracker,
@@ -18,6 +19,7 @@ import {
   type Vec3,
 } from '@unionkitbot/shared';
 import type { AgentEventEmitter } from '../events.js';
+import { classifyNavigationFailure, decideRepath } from './repath.js';
 
 const { goals, Movements } = mineflayerPathfinder;
 
@@ -35,6 +37,8 @@ export interface NavigationResult {
   finalPosition: Vec3 | null;
   replans: number;
   elapsedMs: number;
+  /** True when the failure was caused by the bot being unable to move. */
+  stuck: boolean;
 }
 
 /**
@@ -56,6 +60,18 @@ export interface NavigatorOptions {
   events: AgentEventEmitter;
   settings: AgentSettings;
   getBot: () => Bot | null;
+  /** Persists a navigation failure. Optional so the navigator works without a database. */
+  onFailure?: (failure: {
+    label: string;
+    reason: string;
+    category: string;
+    replans: number;
+    elapsedMs: number;
+    from: Vec3 | null;
+    to: Vec3 | null;
+    stuck: boolean;
+    dimension: string | null;
+  }) => void | Promise<void>;
 }
 
 /**
@@ -68,6 +84,7 @@ export class Navigator {
   private status = 'idle';
   private lastResult: NavigationResult | null = null;
   private activeTarget: NavigationTarget | null = null;
+  private movementsApplied = false;
 
   constructor(options: NavigatorOptions) {
     this.options = options;
@@ -91,11 +108,30 @@ export class Navigator {
     return bot;
   }
 
+  /**
+   * Applies the configured movement options to the pathfinder.
+   *
+   * `canDig` is forced off unless explicitly enabled: breaking blocks to reach a goal is a
+   * server-specific privilege, never something the bot should assume. No anti-cheat or
+   * exploit-based movement is configured here.
+   */
   private configureMovements(bot: Bot): void {
     try {
       const movements = new Movements(bot);
+      const nav = this.options.settings.navigation;
+      const withDig = movements as unknown as { canDig?: boolean };
+      withDig.canDig = nav.canDig === true;
+      if (nav.avoidDangerousBlocks) {
+        // Prefer safe terrain: avoid walking through liquids and other hazards the
+        // pathfinder knows about. Unsupported flags are simply ignored by the library.
+        const advanced = movements as unknown as Record<string, unknown>;
+        if (!('allow1by1towers' in advanced)) advanced['allow1by1towers'] = false;
+        if (!('allowFreeMotion' in advanced)) advanced['allowFreeMotion'] = false;
+      }
       bot.pathfinder.setMovements(movements);
+      this.movementsApplied = true;
     } catch (error) {
+      // A pathfinder API change must not stop navigation: the library's defaults apply.
       this.options.logger.debug({ err: error }, 'failed to configure movements');
     }
   }
@@ -192,6 +228,9 @@ export class Navigator {
     this.activeTarget = target;
     const startedAt = Date.now();
     let replans = 0;
+    let attemptsSinceProgress = 0;
+    let lastReplanPosition: Vec3 | null = null;
+    let everStuck = false;
     this.configureMovements(bot);
     const tracker = createStuckTracker();
 
@@ -223,12 +262,36 @@ export class Navigator {
 
         const stuck = updateStuckTracker(tracker, position, nav.stuckThreshold);
         if (stuck) {
+          everStuck = true;
           if (Date.now() - lastReplanAt < nav.replanCooldownMs) {
             // Wait out the cooldown instead of hammering the pathfinder.
             continue;
           }
+          // Progress is measured between replans: a replan that moved the bot counts as
+          // progress, one that did not means the route is likely impossible.
+          const movedSinceLastReplan =
+            lastReplanPosition === null ||
+            horizontalDistance(lastReplanPosition, position) >= MIN_MOVEMENT_EPSILON;
+          if (!movedSinceLastReplan) {
+            attemptsSinceProgress += 1;
+          } else {
+            attemptsSinceProgress = 0;
+          }
+          const decision = decideRepath({
+            replans,
+            maxRepathAttempts: nav.maxRepathAttempts,
+            movedSinceLastReplan,
+            attemptsSinceProgress,
+            maxAttemptsWithoutProgress: Math.max(3, Math.floor(nav.maxRepathAttempts / 2)),
+          });
+          if (!decision.allowed) {
+            throw new NavigationError(
+              `cannot reach ${target.label}: ${decision.reason} (stuck near ${formatVec3(position)})`,
+            );
+          }
           replans += 1;
           lastReplanAt = Date.now();
+          lastReplanPosition = position;
           this.options.events.emit(
             'bot:log',
             `stuck near ${formatVec3(position)}; replanning`,
@@ -246,9 +309,6 @@ export class Navigator {
           goal = this.buildGoal(bot, target);
           bot.pathfinder.setGoal(goal, false);
           resetStuckTracker(tracker, position);
-          if (replans > 12) {
-            throw new NavigationError(`stuck for too long while navigating to ${target.label}`);
-          }
           continue;
         }
 
@@ -259,6 +319,7 @@ export class Navigator {
             finalPosition: position,
             replans,
             elapsedMs: Date.now() - startedAt,
+            stuck: false,
           };
           this.lastResult = result;
           this.status = 'idle';
@@ -277,28 +338,58 @@ export class Navigator {
     } catch (error) {
       const cancelled = error instanceof CancellationError;
       const reason = error instanceof Error ? error.message : String(error);
+      const finalPosition = this.positionOf(bot);
       const result: NavigationResult = {
         ok: false,
         reason,
-        finalPosition: this.positionOf(bot),
+        finalPosition,
         replans,
         elapsedMs: Date.now() - startedAt,
+        stuck: everStuck && !cancelled,
       };
       this.lastResult = result;
       this.status = cancelled ? 'cancelled' : `failed: ${reason}`;
       this.options.events.emit(
         'bot:log',
         `navigation failed: ${reason}`,
-        { reason },
+        { reason, replans, category: classifyNavigationFailure(reason, result.stuck) },
         {
           botId: this.options.botId,
           severity: cancelled ? 'info' : 'warn',
         },
       );
+      // Cancellation is an operator action, not a defect worth persisting as a failure.
+      if (!cancelled) {
+        await this.recordFailure(target, result, finalPosition);
+      }
       return result;
     } finally {
       if (this.token === token) this.token = null;
       this.activeTarget = null;
+    }
+  }
+
+  /** Reports a navigation failure to the persistence hook, if one is configured. */
+  private async recordFailure(
+    target: NavigationTarget,
+    result: NavigationResult,
+    finalPosition: Vec3 | null,
+  ): Promise<void> {
+    if (!this.options.onFailure) return;
+    try {
+      await this.options.onFailure({
+        label: target.label,
+        reason: result.reason,
+        category: classifyNavigationFailure(result.reason, result.stuck),
+        replans: result.replans,
+        elapsedMs: result.elapsedMs,
+        from: finalPosition,
+        to: target.position ?? null,
+        stuck: result.stuck,
+        dimension: null,
+      });
+    } catch (error) {
+      this.options.logger.debug({ err: error }, 'failed to record navigation failure');
     }
   }
 
@@ -310,6 +401,33 @@ export class Navigator {
     });
   }
 
+  /**
+   * Navigates to a stored waypoint.
+   *
+   * The waypoint's coordinates are the goal; its name is only a label. A waypoint in a
+   * different dimension cannot be walked to, so that is refused explicitly rather than
+   * producing a path across the world.
+   */
+  async gotoWaypoint(
+    waypoint: { name: string; dimension: string; x: number; y: number; z: number },
+    currentDimension: string,
+  ): Promise<NavigationResult> {
+    if (waypoint.dimension !== currentDimension) {
+      return {
+        ok: false,
+        reason: `waypoint ${waypoint.name} is in ${waypoint.dimension}, bot is in ${currentDimension}`,
+        finalPosition: null,
+        replans: 0,
+        elapsedMs: 0,
+        stuck: false,
+      };
+    }
+    return this.gotoCoordinates(
+      { x: waypoint.x, y: waypoint.y, z: waypoint.z },
+      `waypoint ${waypoint.name}`,
+    );
+  }
+
   async followPlayer(username: string): Promise<NavigationResult> {
     return this.navigateTo({ kind: 'follow', username, label: `player ${username}` });
   }
@@ -319,7 +437,10 @@ export class Navigator {
   }
 
   private reached(bot: Bot, target: NavigationTarget, position: Vec3): boolean {
-    const radius = this.options.settings.navigation.goalRadius;
+    // waypointTolerance is the operator-facing setting; goalRadius remains the fallback so
+    // an older settings blob without the new key keeps working.
+    const radius = this.options.settings.navigation.waypointTolerance
+      ?? this.options.settings.navigation.goalRadius;
     if (target.kind === 'coordinates' && target.position) {
       return horizontalDistance(position, target.position) <= radius + 0.5;
     }
@@ -334,5 +455,21 @@ export class Navigator {
       return horizontalDistance(position, entity.position) <= radius + 0.5;
     }
     return true;
+  }
+
+  /**
+   * Distance from the bot to an online player, or null when the player or bot is not
+   * available. Used by delivery to decide whether the recipient is close enough to drop to.
+   */
+  playerDistance(username: string): number | null {
+    const bot = this.options.getBot();
+    if (!bot) return null;
+    const entity = this.findPlayer(username);
+    if (!entity) return null;
+    const position = bot.entity.position;
+    const dx = position.x - entity.position.x;
+    const dy = position.y - entity.position.y;
+    const dz = position.z - entity.position.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 }

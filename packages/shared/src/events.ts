@@ -11,6 +11,7 @@ export const AGENT_EVENT_TYPES = [
   'bot:chat',
   'bot:tpa',
   'bot:task',
+  'bot:order',
   'bot:delivery',
   'bot:storage-scan',
   'bot:waypoint',

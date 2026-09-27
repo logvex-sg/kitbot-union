@@ -7,6 +7,7 @@ import { Automation } from './pages/Automation';
 import { Tasks } from './pages/Tasks';
 import { Players } from './pages/Players';
 import { Deliveries } from './pages/Deliveries';
+import { Orders } from './pages/Orders';
 import { Waypoints } from './pages/Waypoints';
 import { Inventory } from './pages/Inventory';
 import { Storage } from './pages/Storage';
@@ -23,6 +24,7 @@ const PAGES = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'players', label: 'Players' },
   { id: 'deliveries', label: 'Deliveries' },
+  { id: 'orders', label: 'Orders' },
   { id: 'waypoints', label: 'Waypoints' },
   { id: 'inventory', label: 'Inventory' },
   { id: 'storage', label: 'Storage' },
@@ -167,6 +169,7 @@ export function App() {
         {page === 'tasks' ? <Tasks api={api} /> : null}
         {page === 'players' ? <Players api={api} /> : null}
         {page === 'deliveries' ? <Deliveries api={api} /> : null}
+        {page === 'orders' ? <Orders api={api} /> : null}
         {page === 'waypoints' ? <Waypoints api={api} /> : null}
         {page === 'inventory' ? <Inventory api={api} /> : null}
         {page === 'storage' ? <Storage api={api} /> : null}

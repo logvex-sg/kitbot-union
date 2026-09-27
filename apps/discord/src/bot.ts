@@ -208,6 +208,38 @@ export class UnionKitDiscord {
           x !== null && y !== null && z !== null ? [String(x), String(y), String(z)] : [];
         return this.options.agent.send('scan', args, bot, interaction.user.id);
       }
+      case 'order': {
+        const player = stringOpt('player');
+        if (!player) return { ok: false, message: 'player is required' };
+        const kits = stringOpt('kits');
+        const args = [
+          player,
+          ...(kits
+            ? kits
+                .split(',')
+                .map((k) => k.trim())
+                .filter(Boolean)
+            : []),
+        ];
+        return this.options.agent.send('order', args, bot, interaction.user.id);
+      }
+      case 'orders':
+        return this.options.agent.send('orders', [], bot, interaction.user.id);
+      case 'cancelorder': {
+        const code = interaction.options.getInteger('code');
+        if (code === null) return { ok: false, message: 'code is required' };
+        return this.options.agent.send('cancelorder', [String(code)], bot, interaction.user.id);
+      }
+      case 'mappings':
+        return this.options.agent.send('storagemappings', [], bot, interaction.user.id);
+      case 'setmapping': {
+        const group = stringOpt('group');
+        const kit = stringOpt('kit');
+        if (!group || !kit) return { ok: false, message: 'group and kit are required' };
+        return this.options.agent.send('setmapping', [group, kit], bot, interaction.user.id);
+      }
+      case 'webhook':
+        return this.options.agent.send('webhook', ['show'], bot, interaction.user.id);
       case 'say': {
         const message = stringOpt('message');
         if (!message) return { ok: false, message: 'message is required' };

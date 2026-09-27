@@ -6,7 +6,15 @@ import type {
   TaskPriority,
   TaskType,
 } from '@unionkitbot/shared';
-import { PRIORITY_WEIGHT, PriorityTaskQueue, WriteBehind, mergeAgentSettings, parseChatEnvelope, stripFormatting } from '@unionkitbot/shared';
+import {
+  PRIORITY_WEIGHT,
+  PriorityTaskQueue,
+  ReservationLedger,
+  WriteBehind,
+  mergeAgentSettings,
+  parseChatEnvelope,
+  stripFormatting,
+} from '@unionkitbot/shared';
 import type { Repositories, RedisState } from '@unionkitbot/database';
 import { taskRowToPriorityTask } from '@unionkitbot/database';
 import type { AgentEventEmitter } from './events.js';
@@ -20,6 +28,11 @@ import { StorageScanner } from './storage/scanner.js';
 import { WaypointService } from './waypoints/service.js';
 import { DeathService } from './death/service.js';
 import { DeliveryService } from './delivery/delivery-service.js';
+import { TpaRequester } from './delivery/tpa-requester.js';
+import { OrderService } from './orders/service.js';
+import { StorageMappingService } from './storage/mappings.js';
+import { safeHost } from '@unionkitbot/shared';
+import { WebhookDispatcher } from './webhooks/dispatcher.js';
 import { TpaRuntime } from './tpa/runtime.js';
 import { createTaskHandlers } from './tasks/handlers.js';
 
@@ -71,18 +84,26 @@ export class BotRuntime {
   readonly death: DeathService;
   readonly delivery: DeliveryService;
   readonly tpa: TpaRuntime;
+  readonly outgoingTpa: TpaRequester;
+  readonly orders: OrderService;
+  readonly reservations: ReservationLedger;
+  readonly storageMappings: StorageMappingService;
+  readonly webhooks: WebhookDispatcher;
 
   private readonly deps: RuntimeDependencies;
   private settings: AgentSettings;
   private heartbeat: NodeJS.Timeout | null = null;
   private startedAt = Date.now();
   private runningTaskId: string | null = null;
+  private activeOrderId: string | null = null;
+  private unsubscribeWebhooks: (() => void) | null = null;
   /**
    * Write-behind persister for task state. Ordering per task is guaranteed, and terminal
    * transitions are drained in stop() so a shutdown cannot lose them.
    */
   private readonly taskWrites: WriteBehind<PriorityTask>;
   private wasStartedFlag = false;
+  private webhookRowId: string | null = null;
 
   constructor(definition: BotDefinitionInput, deps: RuntimeDependencies) {
     this.definition = definition;
@@ -127,6 +148,25 @@ export class BotRuntime {
       events: deps.events,
       settings: this.settings,
       getBot: () => this.connection.getBot(),
+      onFailure: async (failure) => {
+        await deps.repositories.orders
+          .recordNavigationFailure({
+            botId,
+            taskId: this.runningTaskId,
+            label: failure.label,
+            reason: failure.reason,
+            replans: failure.replans,
+            elapsedMs: failure.elapsedMs,
+            dimension: failure.dimension,
+            from: failure.from,
+            to: failure.to,
+            stuck: failure.stuck,
+            metadata: { category: failure.category },
+          })
+          .catch((error: unknown) => {
+            deps.logger.debug({ err: error }, 'failed to record navigation failure');
+          });
+      },
     });
     this.inventory = new InventoryService(() => this.connection.getBot());
     this.chat = new ChatService({
@@ -158,6 +198,9 @@ export class BotRuntime {
       waypoints: this.waypoints,
       getDimension: () => this.dimension(),
       getActiveTaskId: () => this.runningTaskId,
+      getState: () => this.connection.currentState,
+      server: `${definition.serverHost}:${definition.serverPort}`,
+      getActiveOrderId: () => this.activeOrderId,
     });
     this.delivery = new DeliveryService({
       botId,
@@ -175,6 +218,8 @@ export class BotRuntime {
       getDimension: () => this.dimension(),
       approachDistance: this.settings.delivery.approachDistance,
       verifyTimeoutMs: this.settings.delivery.verifyTimeoutMs,
+      dropRange: this.settings.delivery.dropRange,
+      getSettings: () => this.settings,
     });
     this.tpa = new TpaRuntime({
       botId,
@@ -183,6 +228,60 @@ export class BotRuntime {
       eventsRepository: deps.repositories.events,
       getSettings: () => this.settings.tpa,
       say: (message) => this.chat.say(message),
+    });
+    this.outgoingTpa = new TpaRequester({
+      botId,
+      logger: deps.logger,
+      events: deps.events,
+      getSettings: () => this.settings.outgoingTpa,
+      say: (message) => this.chat.say(message),
+      onChat: (handler) => this.chat.onRaw(handler),
+      isConnected: () => this.connection.isConnected,
+    });
+    this.reservations = new ReservationLedger({
+      botId,
+      logger: deps.logger,
+      events: deps.events,
+    });
+    this.storageMappings = new StorageMappingService({
+      botId,
+      server: `${definition.serverHost}:${definition.serverPort}`,
+      logger: deps.logger,
+      events: deps.events,
+      mappings: deps.repositories.storageMappings,
+      kits: deps.repositories.kits,
+      getDimension: () => this.dimension(),
+    });
+    this.orders = new OrderService({
+      botId,
+      username: definition.username,
+      server: `${definition.serverHost}:${definition.serverPort}`,
+      logger: deps.logger,
+      events: deps.events,
+      getSettings: () => this.settings,
+      inventory: this.inventory,
+      navigator: this.navigator,
+      delivery: this.delivery,
+      tpa: this.outgoingTpa,
+      reservations: this.reservations,
+      kits: deps.repositories.kits,
+      orders: deps.repositories.orders,
+      storageMappings: deps.repositories.storageMappings,
+      accountLinks: deps.repositories.accountLinks,
+      isConnected: () => this.connection.isConnected,
+      onOrderActive: (orderId) => {
+        this.activeOrderId = orderId;
+      },
+      onOrderFinished: () => {
+        this.activeOrderId = null;
+      },
+    });
+    this.webhooks = new WebhookDispatcher({
+      logger: deps.logger,
+      events: deps.events,
+      repository: deps.repositories.webhooks,
+      getConfig: () => this.settings.webhooks,
+      getWebhookId: () => this.webhookRowId,
     });
 
     this.taskWrites = new WriteBehind<PriorityTask>(
@@ -237,7 +336,12 @@ export class BotRuntime {
       tpa: this.tpa.state,
       registry: this.deps.registry,
       storage: this.deps.repositories.storage,
+      orders: this.orders,
+      reservations: this.reservations,
+      outgoingTpa: this.outgoingTpa,
+      storageMappings: this.storageMappings,
       getBot: () => this.connection.getBot(),
+      getState: () => this.connection.currentState,
     };
   }
 
@@ -280,14 +384,54 @@ export class BotRuntime {
       });
     this.connection.setSessionRowId(session?.id ?? null);
 
+    // Load the durable webhook configuration and start delivering events. A failure here
+    // disables webhooks for this bot but must never stop the bot from connecting.
+    this.unsubscribeWebhooks = this.webhooks.start();
+    await this.loadWebhookConfig().catch((error: unknown) => {
+      this.deps.logger.warn({ err: error }, 'failed to load webhook configuration');
+    });
+    await this.orders.restoreReservations().catch((error: unknown) => {
+      this.deps.logger.warn({ err: error }, 'failed to restore item reservations');
+    });
+
     this.enqueue('CONNECT', 'CRITICAL', {}, 'startup connect');
     this.startHeartbeat();
+  }
+
+  /**
+   * Reads the persisted webhook row into the in-memory settings and remembers its id for
+   * delivery history. When no row exists the configured defaults apply unchanged.
+   */
+  private async loadWebhookConfig(): Promise<void> {
+    const row = await this.deps.repositories.webhooks.getByName('default');
+    if (!row) return;
+    this.webhookRowId = row.id;
+    this.settings = {
+      ...this.settings,
+      webhooks: {
+        enabled: row.enabled,
+        url: row.url,
+        events: row.events,
+        retryCount: row.retryCount,
+        timeoutMs: row.timeoutMs,
+        rateLimitPerMinute: row.rateLimitPerMinute,
+        includePayload: row.includePayload,
+      } as AgentSettings['webhooks'],
+    };
+  }
+
+  /** Re-reads the persisted webhook row; call after an operator edits webhook settings. */
+  async reloadWebhookConfig(): Promise<void> {
+    await this.loadWebhookConfig();
   }
 
   async stop(reason = 'requested by operator'): Promise<void> {
     this.wasStartedFlag = false;
     this.queue.cancelAll(reason);
     this.navigator.cancel(reason);
+    this.outgoingTpa.cancel();
+    this.unsubscribeWebhooks?.();
+    this.unsubscribeWebhooks = null;
     await this.connection.stop(reason);
     this.stopHeartbeat();
     // Drain terminal task states before releasing the session, so a restart does not
@@ -295,6 +439,11 @@ export class BotRuntime {
     await this.flushTaskWrites().catch((error: unknown) =>
       this.deps.logger.debug({ err: error }, 'failed draining task writes'),
     );
+    // Give in-flight webhook deliveries a bounded window to finish before shutting down.
+    await this.webhooks.drain(3_000).catch((error: unknown) =>
+      this.deps.logger.debug({ err: error }, 'failed draining webhook deliveries'),
+    );
+    this.outgoingTpa.dispose();
     await this.closeSession(reason);
     await this.deps.redis.clearBotState(this.definition.id).catch(() => undefined);
   }
@@ -507,6 +656,79 @@ export class BotRuntime {
 
   listTasks(): PriorityTask[] {
     return this.queue.list();
+  }
+
+  // ------------------------------------------------------------------ orders
+
+  async listOrders(limit = 50) {
+    return this.deps.repositories.orders.list({ botId: this.definition.id, limit });
+  }
+
+  /**
+   * Persists a new order and queues its execution task.
+   *
+   * Creation is deliberately separate from execution: the operator gets the order code back
+   * immediately, and the task queue decides when the bot actually starts on it.
+   */
+  async createOrder(input: {
+    kitIds: string[];
+    recipient?: string | null;
+    discordUserId?: string | null;
+    requestedBy: string;
+    source: 'discord' | 'api' | 'chat' | 'cli';
+  }) {
+    const order = await this.orders.create({
+      kitIds: input.kitIds,
+      recipient: input.recipient ?? null,
+      discordUserId: input.discordUserId ?? null,
+      requestedBy: input.requestedBy,
+      source: input.source,
+    });
+    this.enqueue(
+      'ORDER',
+      'HIGH',
+      { orderId: order.id },
+      `order #${order.code} for ${order.recipientUsername ?? 'unknown'}`,
+    );
+    return order;
+  }
+
+  /** Cancels by order code when the argument is numeric, otherwise by id. */
+  async cancelOrder(codeOrId: string, actor: string): Promise<boolean> {
+    const byCode = /^\d+$/.test(codeOrId)
+      ? await this.deps.repositories.orders.getByCode(this.definition.id, Number(codeOrId))
+      : await this.deps.repositories.orders.get(codeOrId);
+    if (!byCode) return false;
+    if (byCode.botId && byCode.botId !== this.definition.id) return false;
+    return this.orders.cancel(byCode.id, `cancelled by ${actor}`);
+  }
+
+  async setStorageMapping(groupOrId: string, kitId: string | null, actor: string) {
+    return this.storageMappings.override(groupOrId, kitId, actor);
+  }
+
+  /** Redacted view of webhook configuration; the URL is never returned. */
+  async webhookSnapshot(): Promise<{
+    enabled: boolean;
+    configured: boolean;
+    urlHost: string | null;
+    events: string[];
+    retryCount: number;
+    timeoutMs: number;
+    rateLimitPerMinute: number;
+    includePayload: boolean;
+  }> {
+    const config = this.settings.webhooks;
+    return {
+      enabled: config.enabled,
+      configured: Boolean(config.url),
+      urlHost: config.url ? safeHost(config.url) : null,
+      events: [...config.events],
+      retryCount: config.retryCount,
+      timeoutMs: config.timeoutMs,
+      rateLimitPerMinute: config.rateLimitPerMinute,
+      includePayload: config.includePayload,
+    };
   }
 
   // ------------------------------------------------------------------ status

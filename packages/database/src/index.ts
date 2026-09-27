@@ -9,6 +9,20 @@ export { KitRepository } from './repositories/kits.js';
 export { WaypointRepository, type WaypointRow } from './repositories/waypoints.js';
 export { DeliveryRepository, type DeliveryRow } from './repositories/deliveries.js';
 export { StorageRepository } from './repositories/storage.js';
+export {
+  StorageMappingRepository,
+  type StorageMappingRecord,
+  type UpsertMappingInput,
+} from './repositories/storage-mappings.js';
+export { OrderRepository, orderRowToRecord, type OrderRow } from './repositories/orders.js';
+export {
+  AccountLinkRepository,
+  type LinkResult,
+} from './repositories/account-links.js';
+export {
+  WebhookRepository,
+  type WebhookConfigRecord,
+} from './repositories/webhooks.js';
 export { EventRepository } from './repositories/events.js';
 export { PlayerRepository } from './repositories/players.js';
 
@@ -20,6 +34,10 @@ import { KitRepository } from './repositories/kits.js';
 import { WaypointRepository } from './repositories/waypoints.js';
 import { DeliveryRepository } from './repositories/deliveries.js';
 import { StorageRepository } from './repositories/storage.js';
+import { StorageMappingRepository } from './repositories/storage-mappings.js';
+import { OrderRepository } from './repositories/orders.js';
+import { AccountLinkRepository } from './repositories/account-links.js';
+import { WebhookRepository } from './repositories/webhooks.js';
 import { EventRepository } from './repositories/events.js';
 import { PlayerRepository } from './repositories/players.js';
 
@@ -31,6 +49,10 @@ export interface Repositories {
   waypoints: WaypointRepository;
   deliveries: DeliveryRepository;
   storage: StorageRepository;
+  storageMappings: StorageMappingRepository;
+  orders: OrderRepository;
+  accountLinks: AccountLinkRepository;
+  webhooks: WebhookRepository;
   events: EventRepository;
   players: PlayerRepository;
 }
@@ -44,6 +66,10 @@ export function createRepositories(pool: pg.Pool): Repositories {
     waypoints: new WaypointRepository(pool),
     deliveries: new DeliveryRepository(pool),
     storage: new StorageRepository(pool),
+    storageMappings: new StorageMappingRepository(pool),
+    orders: new OrderRepository(pool),
+    accountLinks: new AccountLinkRepository(pool),
+    webhooks: new WebhookRepository(pool),
     events: new EventRepository(pool),
     players: new PlayerRepository(pool),
   };

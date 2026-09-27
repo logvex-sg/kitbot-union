@@ -131,6 +131,76 @@ export class Api {
       `/api/storage/scans${botId ? `?botId=${botId}` : ''}`,
     );
   }
+  requestStorageScan(body: unknown) {
+    return this.request<Json>('POST', '/api/storage/scans', body);
+  }
+  storageMappings(params: Record<string, string> = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request<{ mappings: Json[] }>('GET', `/api/storage/mappings${qs ? `?${qs}` : ''}`);
+  }
+  setStorageMapping(id: string, body: unknown) {
+    return this.request<Json>('PATCH', `/api/storage/mappings/${id}`, body);
+  }
+
+  orders(params: Record<string, string> = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request<{ orders: Json[] }>('GET', `/api/orders${qs ? `?${qs}` : ''}`);
+  }
+  order(id: string) {
+    return this.request<Json>('GET', `/api/orders/${id}`);
+  }
+  createOrder(body: unknown) {
+    return this.request<Json>('POST', '/api/orders', body);
+  }
+  cancelOrder(code: string, botId?: string) {
+    const qs = botId ? `?botId=${botId}` : '';
+    return this.request<Json>('POST', `/api/orders/code/${code}/cancel${qs}`);
+  }
+  orderAttempts(id: string) {
+    return this.request<{ attempts: Json[] }>('GET', `/api/orders/${id}/attempts`);
+  }
+
+  accountLinks(params: Record<string, string> = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request<{ links: Json[] }>('GET', `/api/account-links${qs ? `?${qs}` : ''}`);
+  }
+  createAccountLink(body: unknown) {
+    return this.request<Json>('POST', '/api/account-links', body);
+  }
+  deleteAccountLink(id: string) {
+    return this.request<Json>('DELETE', `/api/account-links/${id}`);
+  }
+
+  webhooks() {
+    return this.request<{ webhooks: Json[] }>('GET', '/api/webhooks');
+  }
+  webhook(name: string) {
+    return this.request<Json>('GET', `/api/webhooks/${encodeURIComponent(name)}`);
+  }
+  putWebhook(body: unknown) {
+    return this.request<Json>('PUT', '/api/webhooks', body);
+  }
+  updateWebhook(name: string, body: unknown) {
+    return this.request<Json>('PATCH', `/api/webhooks/${encodeURIComponent(name)}`, body);
+  }
+  webhookDeliveries(name: string) {
+    return this.request<Json>(
+      'GET',
+      `/api/webhooks/${encodeURIComponent(name)}/deliveries`,
+    );
+  }
+
+  deaths(params: Record<string, string> = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request<{ deaths: Json[] }>('GET', `/api/deaths${qs ? `?${qs}` : ''}`);
+  }
+  navigationFailures(params: Record<string, string> = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request<{ failures: Json[] }>(
+      'GET',
+      `/api/navigation/failures${qs ? `?${qs}` : ''}`,
+    );
+  }
   events(params: Record<string, string> = {}) {
     const qs = new URLSearchParams(params).toString();
     return this.request<Json>('GET', `/api/events${qs ? `?${qs}` : ''}`);

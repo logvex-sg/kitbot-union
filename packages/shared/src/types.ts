@@ -1,3 +1,5 @@
+import type { WebhookConfig } from './webhooks.js';
+
 export const BOT_STATES = [
   'OFFLINE',
   'CONNECTING',
@@ -28,6 +30,8 @@ export const TASK_TYPES = [
   'DEATH_RECOVERY',
   'TPA_HANDLING',
   'DELIVERY',
+  'ORDER',
+  'RETURN_TO_PACK',
   'NAVIGATE',
   'FOLLOW',
   'INVENTORY',
@@ -142,6 +146,10 @@ export interface KitDefinition {
   description?: string;
   items: ItemRequirement[];
   enabled?: boolean;
+  /** Extra sign-text aliases that should resolve to this kit. */
+  aliases?: string[];
+  /** Whether signs near storage may label this kit automatically. */
+  storageAutoDetect?: boolean;
 }
 
 export interface InventorySlotSummary {
@@ -257,11 +265,60 @@ export interface AgentSettings {
     stuckCheckIntervalMs: number;
     stuckThreshold: number;
     replanCooldownMs: number;
+    /** Maximum consecutive replans before a navigation is declared failed. */
+    maxRepathAttempts: number;
+    /** Waypoint arrival tolerance in blocks; falls back to goalRadius when unset. */
+    waypointTolerance: number;
+    /** Ask the pathfinder to avoid water and other hazardous blocks where supported. */
+    avoidDangerousBlocks: boolean;
+    /** Allow the pathfinder to break/place blocks. Off by default: never a bypass. */
+    canDig: boolean;
   };
-  storage: { scanRadius: number; inspectContents: boolean };
+  storage: {
+    scanRadius: number;
+    inspectContents: boolean;
+    /** Recognise kit types from chest signs. */
+    signAutoDetect: boolean;
+    /** How far a sign may sit from a container and still be associated. */
+    signMaxDistance: number;
+  };
   chat: { respondToGreetings: boolean; greetingMessage: string; responseCooldownMs: number };
-  delivery: { approachDistance: number; verifyTimeoutMs: number; maxRetries: number };
+  delivery: {
+    approachDistance: number;
+    verifyTimeoutMs: number;
+    maxRetries: number;
+    /** Distance within which items may be dropped to the recipient. */
+    dropRange: number;
+    postDelivery: { enabled: boolean; command: string };
+  };
   tpa: TpaSettings;
+  /** Outbound TPA requests the bot makes while delivering. */
+  outgoingTpa: OutgoingTpaSettings;
+  powerSaving: {
+    enabled: boolean;
+    idleScanIntervalSeconds: number;
+    idleTelemetryIntervalSeconds: number;
+    aggressive: boolean;
+  };
+  webhooks: WebhookConfig;
+  linking: {
+    requireConfirmation: boolean;
+    validateUsername: boolean;
+    uniqueMinecraftAccount: boolean;
+    allowMultiplePerDiscordUser: boolean;
+  };
+  packArea: { waypointName: string | null; dimension: string | null } | null;
+}
+
+/** Configuration for TPA requests the bot sends to reach a recipient. */
+export interface OutgoingTpaSettings {
+  enabled: boolean;
+  /** Command template; `{player}` is substituted with the recipient username. */
+  command: string;
+  timeoutSeconds: number;
+  maxRetries: number;
+  /** Server teleport delay to observe after the request is accepted. */
+  teleportWaitSeconds: number;
 }
 
 export interface PriorityTask<T = unknown> {

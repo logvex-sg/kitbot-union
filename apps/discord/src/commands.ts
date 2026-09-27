@@ -87,6 +87,53 @@ export const commandDefinitions = [
     )
     .addSubcommand((sc) =>
       sc
+        .setName('order')
+        .setDescription('Queue a kit order for a recipient')
+        .addStringOption((o) => o.setName('player').setDescription('Recipient').setRequired(true))
+        .addStringOption((o) =>
+          o.setName('kits').setDescription('Comma-separated kit ids').setRequired(false),
+        )
+        .addStringOption((o) => o.setName('bot').setDescription('Bot name').setRequired(false)),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('orders')
+        .setDescription('List recent orders')
+        .addStringOption((o) => o.setName('bot').setDescription('Bot name').setRequired(false)),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('cancelorder')
+        .setDescription('Cancel an order by code')
+        .addIntegerOption((o) => o.setName('code').setDescription('Order code').setRequired(true))
+        .addStringOption((o) => o.setName('bot').setDescription('Bot name').setRequired(false)),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('mappings')
+        .setDescription('List kit storage sign mappings')
+        .addStringOption((o) => o.setName('bot').setDescription('Bot name').setRequired(false)),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('setmapping')
+        .setDescription('Override the kit detected for a storage group')
+        .addStringOption((o) =>
+          o.setName('group').setDescription('Storage group key').setRequired(true),
+        )
+        .addStringOption((o) =>
+          o.setName('kit').setDescription('Kit id, or "-" to clear').setRequired(true),
+        )
+        .addStringOption((o) => o.setName('bot').setDescription('Bot name').setRequired(false)),
+    )
+    .addSubcommand((sc) =>
+      sc
+        .setName('webhook')
+        .setDescription('Show webhook configuration (URL is redacted)')
+        .addStringOption((o) => o.setName('bot').setDescription('Bot name').setRequired(false)),
+    )
+    .addSubcommand((sc) =>
+      sc
         .setName('say')
         .setDescription('Send a Minecraft chat message')
         .addStringOption((o) => o.setName('message').setDescription('Message').setRequired(true))

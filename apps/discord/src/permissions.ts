@@ -24,6 +24,9 @@ const READ_ONLY = new Set([
   'logs',
   'chat',
   'bots',
+  'orders',
+  'mappings',
+  'webhook',
 ]);
 
 export function isReadOnly(command: string): boolean {

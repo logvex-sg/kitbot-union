@@ -7,7 +7,7 @@ export class KitRepository {
 
   async list(): Promise<KitDefinition[]> {
     const { rows } = await this.pool.query(
-      `SELECT k.id, k.name, k.description, k.enabled,
+      `SELECT k.id, k.name, k.description, k.enabled, k.aliases, k.storage_auto_detect,
               COALESCE(
                 json_agg(json_build_object('item', ki.item, 'count', ki.count) ORDER BY ki.item)
                   FILTER (WHERE ki.id IS NOT NULL),
@@ -15,7 +15,7 @@ export class KitRepository {
               ) AS items
        FROM kits k
        LEFT JOIN kit_items ki ON ki.kit_id = k.id
-       GROUP BY k.id, k.name, k.description, k.enabled
+       GROUP BY k.id, k.name, k.description, k.enabled, k.aliases, k.storage_auto_detect
        ORDER BY k.id`,
     );
     return rows.map((r) => {
@@ -24,6 +24,8 @@ export class KitRepository {
         name: String(r['name']),
         enabled: Boolean(r['enabled']),
         items: (r['items'] as Array<{ item: string; count: number }>) ?? [],
+        aliases: (r['aliases'] as string[] | null) ?? [],
+        storageAutoDetect: Boolean(r['storage_auto_detect']),
       };
       if (r['description']) kit.description = String(r['description']);
       return kit;
@@ -40,11 +42,19 @@ export class KitRepository {
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO kits (id, name, description, enabled, updated_at)
-         VALUES ($1,$2,$3,$4, now())
+        `INSERT INTO kits (id, name, description, enabled, aliases, storage_auto_detect, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6, now())
          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
-           enabled = EXCLUDED.enabled, updated_at = now()`,
-        [kit.id, kit.name, kit.description ?? null, kit.enabled ?? true],
+           enabled = EXCLUDED.enabled, aliases = EXCLUDED.aliases,
+           storage_auto_detect = EXCLUDED.storage_auto_detect, updated_at = now()`,
+        [
+          kit.id,
+          kit.name,
+          kit.description ?? null,
+          kit.enabled ?? true,
+          kit.aliases ?? [],
+          kit.storageAutoDetect ?? true,
+        ],
       );
       await client.query('DELETE FROM kit_items WHERE kit_id = $1', [kit.id]);
       for (const item of kit.items) {

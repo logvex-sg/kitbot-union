@@ -37,6 +37,7 @@ export class ChatService {
   private readonly options: ChatServiceOptions;
   private readonly handlers = new Map<ChatEventType, Array<(message: ChatMessage) => void>>();
   private readonly recent: ChatMessage[] = [];
+  private readonly rawHandlers = new Set<(line: string) => void>();
 
   constructor(options: ChatServiceOptions) {
     this.options = options;
@@ -59,6 +60,19 @@ export class ChatService {
     return this.recent.slice(-limit);
   }
 
+  /**
+   * Subscribes to every raw inbound line before classification.
+   *
+   * Used by the outgoing TPA requester, which must see the server's accept/reject reply
+   * regardless of how the classifier labels it.
+   */
+  onRaw(handler: (line: string) => void): () => void {
+    this.rawHandlers.add(handler);
+    return () => {
+      this.rawHandlers.delete(handler);
+    };
+  }
+
   say(message: string): void {
     const bot = this.options.getBot();
     if (bot) bot.chat(message);
@@ -66,6 +80,14 @@ export class ChatService {
 
   /** Entry point wired to the mineflayer 'message' event. */
   async ingest(raw: string, username: string | null): Promise<ChatMessage> {
+    for (const handler of this.rawHandlers) {
+      try {
+        handler(raw);
+      } catch (error) {
+        // A misbehaving observer must not stop chat ingestion for everyone else.
+        this.options.logger.debug({ err: error }, 'raw chat handler threw');
+      }
+    }
     let parsed = classifyChat(raw);
 
     if (parsed.eventType === 'UNKNOWN' && this.options.llm) {

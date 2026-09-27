@@ -253,6 +253,97 @@ export class CommandRouter {
         return { ok: true, message: 'sent' };
       }
 
+      // ------------------------------------------------------------ orders
+      case 'order':
+      case 'orders': {
+        if (command === 'orders') {
+          const orders = await runtime!.listOrders();
+          return {
+            ok: true,
+            message: orders.length
+              ? orders
+                  .map((o) => `#${o.code} ${o.state} ${o.status} ${o.recipientUsername ?? '-'}`)
+                  .join('\n')
+              : 'no orders',
+            data: orders,
+          };
+        }
+        const recipient = request.args[0];
+        const kitIds = request.args.slice(1).filter((a) => a.length > 0);
+        if (!recipient) return { ok: false, message: 'usage: order <player> [kitId ...]' };
+        const order = await runtime!.createOrder({
+          recipient,
+          kitIds: kitIds.length ? kitIds : ['starter'],
+          requestedBy: request.actor,
+          source: request.source === 'discord' ? 'discord' : 'api',
+        });
+        return {
+          ok: true,
+          message: `order #${order.code} for ${recipient} accepted`,
+          data: order,
+        };
+      }
+
+      case 'cancelorder': {
+        const codeOrId = request.args[0];
+        if (!codeOrId) return { ok: false, message: 'usage: cancelorder <code|orderId>' };
+        const cancelled = await runtime!.cancelOrder(codeOrId, request.actor);
+        return cancelled
+          ? { ok: true, message: `order ${codeOrId} cancelled` }
+          : { ok: false, message: `order ${codeOrId} not found or already terminal` };
+      }
+
+      case 'storage_mappings':
+      case 'storagemappings': {
+        const mappings = await runtime!.storageMappings.list();
+        return {
+          ok: true,
+          message: mappings.length
+            ? mappings
+                .map(
+                  (m) =>
+                    `${m.groupKey} -> ${m.effectiveKitId ?? 'unresolved'}${
+                      m.matchAmbiguous ? ' (ambiguous)' : ''
+                    }`,
+                )
+                .join('\n')
+            : 'no storage mappings recorded',
+          data: mappings,
+        };
+      }
+
+      case 'setmapping': {
+        const [group, kitId] = request.args;
+        if (!group) return { ok: false, message: 'usage: setmapping <groupKey> [kitId|-]' };
+        const result = await runtime!.setStorageMapping(
+          group,
+          !kitId || kitId === '-' ? null : kitId,
+          request.actor,
+        );
+        return result
+          ? { ok: true, message: `mapping ${group} updated`, data: result }
+          : { ok: false, message: `mapping ${group} not found` };
+      }
+
+      case 'webhook': {
+        const sub = (request.args[0] ?? 'show').toLowerCase();
+        if (sub === 'show') {
+          const snapshot = await runtime!.webhookSnapshot();
+          return {
+            ok: true,
+            message: snapshot.enabled
+              ? `webhooks enabled (${snapshot.events.length || 'all'} kind(s))`
+              : 'webhooks disabled',
+            data: snapshot,
+          };
+        }
+        if (sub === 'reload') {
+          await runtime!.reloadWebhookConfig();
+          return { ok: true, message: 'webhook configuration reloaded' };
+        }
+        return { ok: false, message: 'usage: webhook [show|reload]' };
+      }
+
       case 'bots':
         return {
           ok: true,
